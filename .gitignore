@@ -1,0 +1,7 @@
+venv/
+chroma_db/
+transcript_*.json
+transcript.json
+__pycache__/
+.env
+node_modules/
