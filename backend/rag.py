@@ -98,3 +98,107 @@ def ask(video_id, question, k=5):
             for m, doc in hits
         ],
     }
+
+def get_chunks(video_id):
+    collection = get_collection(video_id)
+    data = collection.get(include=["documents", "metadatas"])
+    items = sorted(zip(data["metadatas"], data["documents"]), key=lambda x: x[0]["start"])
+    return [{"start": m["start"], "text": d} for m, d in items]
+
+
+def llm_json(system, user):
+    resp = client.chat.completions.create(
+        model="openai/gpt-oss-20b",
+        response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+    )
+    return json.loads(resp.choices[0].message.content)
+
+
+def summarize(video_id, section_chunks=9):
+    """9 chunks x 20s = ~3 min per chapter."""
+    cache = f"summary_{video_id}.json"
+    if os.path.exists(cache):
+        with open(cache, encoding="utf-8") as f:
+            return json.load(f)
+
+    chunks = get_chunks(video_id)
+    if not chunks:
+        raise ValueError("video not ingested yet")
+
+    # MAP: har section ka title + summary
+    chapters = []
+    for i in range(0, len(chunks), section_chunks):
+        group = chunks[i:i + section_chunks]
+        text = " ".join(c["text"] for c in group)
+        data = llm_json(
+            'Summarize this transcript section. Return JSON: '
+            '{"title": "3-6 word chapter title", "summary": "one sentence"}. '
+            "Ignore subtitle credits like 'Transcriber' or 'Reviewer'.",
+            text,
+        )
+        chapters.append({
+            "start": group[0]["start"],
+            "time": fmt_time(group[0]["start"]),
+            "title": data.get("title", "Untitled"),
+            "summary": data.get("summary", ""),
+        })
+
+    # REDUCE: chapter summaries se 5 takeaways
+    notes = "\n".join(f"[{c['time']}] {c['title']}: {c['summary']}" for c in chapters)
+    data = llm_json(
+        'Given these chapter notes of a video, return JSON: '
+        '{"takeaways": ["5 short key takeaways"]}',
+        notes,
+    )
+
+    result = {"chapters": chapters, "takeaways": data.get("takeaways", [])}
+    with open(cache, "w", encoding="utf-8") as f:
+        json.dump(result, f, ensure_ascii=False)
+    return result
+
+
+def prepare(video_id, question, k=5):
+    collection = get_collection(video_id)
+    if collection.count() == 0:
+        raise ValueError("video not ingested yet")
+
+    q_vector = model.encode([question], normalize_embeddings=True)[0]
+    res = collection.query(query_embeddings=[q_vector.tolist()], n_results=k)
+    hits = list(zip(res["metadatas"][0], res["documents"][0]))
+    hits.sort(key=lambda h: h[0]["start"])
+
+    context = "\n\n".join(f"[{fmt_time(m['start'])}] {doc}" for m, doc in hits)
+    messages = [
+        {"role": "system", "content": (
+            "Answer the question using ONLY the transcript excerpts given. "
+            "Put each timestamp in square brackets like [7:03] right after the claim it supports. "
+            "If the excerpts don't contain the answer, say so."
+        )},
+        {"role": "user", "content": f"Excerpts:\n{context}\n\nQuestion: {question}"},
+    ]
+    sources = [
+        {"start": m["start"], "time": fmt_time(m["start"]), "text": doc}
+        for m, doc in hits
+    ]
+    return sources, messages
+
+
+import time
+
+def stream_answer(messages):
+    stream = client.chat.completions.create(
+        model="openai/gpt-oss-20b",
+        messages=messages,
+        stream=True,
+    )
+    for part in stream:
+        if not part.choices:
+            continue
+        delta = part.choices[0].delta.content
+        if delta:
+            yield delta
+            time.sleep(0.01)   
