@@ -202,3 +202,33 @@ def stream_answer(messages):
         if delta:
             yield delta
             time.sleep(0.01)   
+
+
+def skim(video_id, query, k=8, merge_gap=10, chunk_len=20):
+    collection = get_collection(video_id)
+    if collection.count() == 0:
+        raise ValueError("video not ingested yet")
+
+    q_vector = model.encode([query], normalize_embeddings=True)[0]
+    res = collection.query(query_embeddings=[q_vector.tolist()], n_results=k)
+    hits = sorted(
+        zip(res["metadatas"][0], res["documents"][0]),
+        key=lambda h: h[0]["start"],
+    )
+
+    segments = []
+    for m, doc in hits:
+        s = m["start"]
+        e = s + chunk_len          
+        if segments and s <= segments[-1]["end"] + merge_gap:
+            segments[-1]["end"] = max(segments[-1]["end"], e)
+            segments[-1]["text"] += " " + doc
+        else:
+            segments.append({"start": s, "end": e, "text": doc})
+
+    for seg in segments:
+        seg["time"] = fmt_time(seg["start"])
+        seg["end_time"] = fmt_time(seg["end"])
+
+    total = sum(s["end"] - s["start"] for s in segments)
+    return {"segments": segments, "total_seconds": round(total)}

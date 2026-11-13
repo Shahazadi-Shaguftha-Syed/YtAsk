@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from fastapi.responses import StreamingResponse
-from rag import ingest, ask, summarize, prepare, stream_answer
+from rag import ingest, ask, summarize, prepare, stream_answer, skim
 import json
 
 
@@ -25,6 +25,20 @@ class AskRequest(BaseModel):
     video_id: str
     question: str
 
+
+
+class SkimRequest(BaseModel):
+    video_id: str
+    query: str
+
+
+@app.post("/skim")
+def skim_video(req: SkimRequest):
+    try:
+        return skim(req.video_id, req.query)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    
 
 @app.get("/")
 def home():

@@ -1,9 +1,8 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 
 const API = "http://127.0.0.1:8000";
 
 
-// link ya seedhi ID dono se video ID nikalta hai
 function extractVideoId(input) {
   const s = input.trim();
   const m = s.match(/(?:v=|youtu\.be\/|embed\/|shorts\/)([A-Za-z0-9_-]{11})/);
@@ -16,6 +15,12 @@ function toSeconds(t) {
   return m * 60 + s;
 }
 
+function fmtTime(sec) {
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
 export default function App() {
   const [link, setLink] = useState("");
   const [videoId, setVideoId] = useState(null);
@@ -23,9 +28,69 @@ export default function App() {
   const [result, setResult] = useState(null);
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(false);
-  const [startAt, setStartAt] = useState(0);
   const [summary, setSummary] = useState(null);
 
+  const [skimQuery, setSkimQuery] = useState("");
+  const [skimPlan, setSkimPlan] = useState(null);
+  const [skimIdx, setSkimIdx] = useState(-1);
+
+  const playerRef = useRef(null);
+  const skimRef = useRef({ active: false, idx: 0, segs: [], since: 0 });
+
+
+  useEffect(() => {
+    if (!videoId) return;
+
+    const create = () => {
+      if (playerRef.current) {
+        playerRef.current.cueVideoById(videoId);
+        return;
+      }
+      playerRef.current = new window.YT.Player("yt-player", {
+        videoId,
+        width: "100%",
+        height: "400",
+        playerVars: { rel: 0 },
+      });
+    };
+
+    if (window.YT && window.YT.Player) {
+      create();
+    } else {
+      window.onYouTubeIframeAPIReady = create;
+      if (!document.getElementById("yt-api")) {
+        const tag = document.createElement("script");
+        tag.id = "yt-api";
+        tag.src = "https://www.youtube.com/iframe_api";
+        document.body.appendChild(tag);
+      }
+    }
+  }, [videoId]);
+
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      const s = skimRef.current;
+      const p = playerRef.current;
+      if (!s.active || !p || !p.getCurrentTime) return;
+      if (Date.now() - s.since < 800) return; // seek settle hone do
+
+      const seg = s.segs[s.idx];
+      if (p.getCurrentTime() >= seg.end) {
+        if (s.idx + 1 < s.segs.length) {
+          s.idx += 1;
+          s.since = Date.now();
+          setSkimIdx(s.idx);
+          p.seekTo(s.segs[s.idx].start, true);
+        } else {
+          s.active = false;
+          setSkimIdx(-1);
+          p.pauseVideo();
+        }
+      }
+    }, 250);
+    return () => clearInterval(id);
+  }, []);
 
   async function post(path, body) {
     const res = await fetch(`${API}${path}`, {
@@ -45,8 +110,11 @@ export default function App() {
     setStatus("processing video...");
     try {
       const data = await post("/ingest", { video_id: id });
+      skimRef.current.active = false;
       setVideoId(id);
       setResult(null);
+      setSkimPlan(null);
+      setSkimIdx(-1);
       setStatus(`ready: ${data.chunks} chunks`);
       setSummary(null);
       fetch(`${API}/summary/${id}`)
@@ -59,7 +127,7 @@ export default function App() {
     setLoading(false);
   }
 
-    async function handleAsk() {
+  async function handleAsk() {
     if (!question.trim()) return;
     setLoading(true);
     setStatus("thinking...");
@@ -106,12 +174,55 @@ export default function App() {
     setLoading(false);
   }
 
+  async function handleSkim() {
+    if (!skimQuery.trim()) return;
+    setLoading(true);
+    setStatus("finding segments...");
+    try {
+      const data = await post("/skim", { video_id: videoId, query: skimQuery });
+      skimRef.current.active = false;
+      setSkimPlan(data);
+      setSkimIdx(-1);
+      setStatus("");
+    } catch (e) {
+      setStatus(`error: ${e.message}`);
+    }
+    setLoading(false);
+  }
+
 
   function seek(seconds) {
-  setStartAt(Math.floor(seconds));
-}
+    skimRef.current.active = false;
+    setSkimIdx(-1);
+    const p = playerRef.current;
+    if (p && p.seekTo) {
+      p.seekTo(Math.floor(seconds), true);
+      p.playVideo();
+    }
+  }
 
-  // answer ke andar ke [7:03] jaise timestamps ko clickable button banata hai
+  function playSkim(idx = 0) {
+    const p = playerRef.current;
+    if (!p || !p.seekTo || !skimPlan) return;
+    skimRef.current = {
+      active: true,
+      idx,
+      segs: skimPlan.segments,
+      since: Date.now(),
+    };
+    setSkimIdx(idx);
+    p.seekTo(skimPlan.segments[idx].start, true);
+    p.playVideo();
+  }
+
+  function stopSkim() {
+    skimRef.current.active = false;
+    setSkimIdx(-1);
+    const p = playerRef.current;
+    if (p && p.pauseVideo) p.pauseVideo();
+  }
+
+
   function renderAnswer(text) {
     return text.split(/(\[\d+:\d{2}\])/g).map((part, i) => {
       const m = part.match(/^\[(\d+:\d{2})\]$/);
@@ -142,17 +253,10 @@ export default function App() {
 
       {status && <p>{status}</p>}
 
-      {videoId && (
-        <iframe
-          key={`${videoId}-${startAt}`}
-          width="100%"
-          height="400"
-          src={`https://www.youtube.com/embed/${videoId}?start=${startAt}&autoplay=1`}
-          allow="autoplay; encrypted-media"
-          allowFullScreen
-          style={{ border: 0, marginTop: 24 }}
-        />
-      )}
+
+      <div style={{ marginTop: 24, display: videoId ? "block" : "none" }}>
+        <div id="yt-player" />
+      </div>
 
       {videoId && !summary && <p style={{ opacity: 0.6 }}>building chapters...</p>}
 
@@ -177,6 +281,41 @@ export default function App() {
 
       {videoId && (
         <div style={{ marginTop: 24 }}>
+          <h3>Smart Skim</h3>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input
+              style={{ flex: 1, padding: 8 }}
+              placeholder="What do you want to watch? e.g. how to start a habit"
+              value={skimQuery}
+              onChange={(e) => setSkimQuery(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleSkim()}
+            />
+            <button onClick={handleSkim} disabled={loading}>Skim</button>
+          </div>
+
+          {skimPlan && (
+            <div style={{ marginTop: 12 }}>
+              <p>
+                {skimPlan.segments.length} segments, {fmtTime(skimPlan.total_seconds)} total{" "}
+                <button onClick={() => playSkim(0)}>▶ Play skim</button>{" "}
+                {skimIdx >= 0 && <button onClick={stopSkim}>Stop</button>}
+              </p>
+              {skimPlan.segments.map((s, i) => (
+                <p key={i} style={{ fontWeight: i === skimIdx ? "bold" : "normal" }}>
+                  <button onClick={() => playSkim(i)}>
+                    [{s.time}-{s.end_time}]
+                  </button>{" "}
+                  {s.text.slice(0, 120)}...
+                </p>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {videoId && (
+        <div style={{ marginTop: 24 }}>
+          <h3>Ask</h3>
           <div style={{ display: "flex", gap: 8 }}>
             <input
               style={{ flex: 1, padding: 8 }}
