@@ -201,7 +201,7 @@ def stream_answer(messages):
         delta = part.choices[0].delta.content
         if delta:
             yield delta
-            time.sleep(0.01)   
+        
 
 
 def skim(video_id, query, k=8, merge_gap=10, chunk_len=20):

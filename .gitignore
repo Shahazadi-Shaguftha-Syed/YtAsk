@@ -6,3 +6,8 @@ __pycache__/
 .env
 node_modules/
 summary_*.json
+dist/
+.DS_Store
+.env.*
+*.pyc
+.venv/
