@@ -1,13 +1,23 @@
 import os, json
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
+import requests
+from requests.adapters import HTTPAdapter
 import chromadb
 from groq import Groq
-from sentence_transformers import SentenceTransformer
+import numpy as np
+from fastembed import TextEmbedding
 from youtube_transcript_api import YouTubeTranscriptApi
 
 # ek baar load hota hai (server start pe), har request pe nahi
-model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+# fastembed = same MiniLM model, but ONNX (no torch), so it fits in ~512 MB RAM
+model = TextEmbedding("sentence-transformers/all-MiniLM-L6-v2")
+
+
+def embed(texts):
+    vecs = np.array(list(model.embed(texts, batch_size=32)), dtype="float32")
+    vecs /= np.linalg.norm(vecs, axis=1, keepdims=True)
+    return vecs
 db = chromadb.PersistentClient(path="chroma_db")
 client = Groq(api_key=os.environ["GROQ_API_KEY"])
 
@@ -17,12 +27,40 @@ def fmt_time(seconds):
     return f"{mins}:{secs:02d}"
 
 
+class _TimeoutAdapter(HTTPAdapter):
+    """Har YouTube request pe timeout lagata hai, taaki connection atke toh error mile, hang nahi."""
+
+    def __init__(self, *args, timeout=(8, 15), **kwargs):
+        self._timeout = timeout
+        super().__init__(*args, **kwargs)
+
+    def send(self, request, **kwargs):
+        if kwargs.get("timeout") is None:
+            kwargs["timeout"] = self._timeout
+        return super().send(request, **kwargs)
+
+
+def _yt_api():
+    session = requests.Session()
+    adapter = _TimeoutAdapter()
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return YouTubeTranscriptApi(http_client=session)
+
+
 def get_transcript(video_id):
     cache = f"transcript_{video_id}.json"
     if os.path.exists(cache):
         with open(cache, encoding="utf-8") as f:
             return json.load(f)
-    transcript = YouTubeTranscriptApi().fetch(video_id, languages=["en"]).to_raw_data()
+    try:
+        transcript = _yt_api().fetch(video_id, languages=["en"]).to_raw_data()
+    except (requests.exceptions.ConnectTimeout,
+            requests.exceptions.ReadTimeout,
+            requests.exceptions.ConnectionError) as e:
+        raise RuntimeError(
+            "Can't reach YouTube from this network. Check your connection or try a hotspot."
+        ) from e
     with open(cache, "w", encoding="utf-8") as f:
         json.dump(transcript, f, ensure_ascii=False)
     return transcript
@@ -58,7 +96,7 @@ def ingest(video_id):
         return collection.count()
     chunks = make_chunks(get_transcript(video_id))
     texts = [c["text"] for c in chunks]
-    vectors = model.encode(texts, normalize_embeddings=True)
+    vectors = embed(texts)
     collection.add(
         ids=[f"{video_id}_{i}" for i in range(len(chunks))],
         documents=texts,
@@ -73,7 +111,7 @@ def ask(video_id, question, k=5):
     if collection.count() == 0:
         raise ValueError("video not ingested yet")
 
-    q_vector = model.encode([question], normalize_embeddings=True)[0]
+    q_vector = embed([question])[0]
     res = collection.query(query_embeddings=[q_vector.tolist()], n_results=k)
     hits = list(zip(res["metadatas"][0], res["documents"][0]))
     hits.sort(key=lambda h: h[0]["start"])
@@ -166,7 +204,7 @@ def prepare(video_id, question, k=5):
     if collection.count() == 0:
         raise ValueError("video not ingested yet")
 
-    q_vector = model.encode([question], normalize_embeddings=True)[0]
+    q_vector = embed([question])[0]
     res = collection.query(query_embeddings=[q_vector.tolist()], n_results=k)
     hits = list(zip(res["metadatas"][0], res["documents"][0]))
     hits.sort(key=lambda h: h[0]["start"])
@@ -209,7 +247,7 @@ def skim(video_id, query, k=8, merge_gap=10, chunk_len=20):
     if collection.count() == 0:
         raise ValueError("video not ingested yet")
 
-    q_vector = model.encode([query], normalize_embeddings=True)[0]
+    q_vector = embed([query])[0]
     res = collection.query(query_embeddings=[q_vector.tolist()], n_results=k)
     hits = sorted(
         zip(res["metadatas"][0], res["documents"][0]),

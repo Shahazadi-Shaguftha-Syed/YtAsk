@@ -330,3 +330,5 @@ button.ts:hover { background: var(--accent); color: #fff; }
   .caret { animation: none; }
 }
 .hero.is-loaded .link-form { max-width: none; }
+
+.demo-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: var(--s-2); font-size: 13.5px; color: var(--muted); }
