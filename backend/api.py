@@ -4,14 +4,20 @@ from pydantic import BaseModel
 from fastapi.responses import StreamingResponse
 from rag import ingest, ask, summarize, prepare, stream_answer, skim
 import json
+import os
 
 
 app = FastAPI()
 
-# frontend (alag port pe chalta hai) ko is API se baat karne ki ijazat
+# frontend (alag port / domain pe chalta hai) ko is API se baat karne ki ijazat.
+# Deploy pe ALLOWED_ORIGINS env var mein Vercel URL daalo (comma se alag karke).
+origins = ["http://localhost:5173", "http://localhost:3000"] + [
+    o.strip().rstrip("/") for o in os.environ.get("ALLOWED_ORIGINS", "").split(",") if o.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -38,7 +44,7 @@ def skim_video(req: SkimRequest):
         return skim(req.video_id, req.query)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    
+
 
 @app.get("/")
 def home():

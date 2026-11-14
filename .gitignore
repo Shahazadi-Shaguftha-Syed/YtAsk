@@ -11,3 +11,6 @@ dist/
 .env.*
 *.pyc
 .venv/
+
+!transcript__l4xZLssfUY.json
+!summary__l4xZLssfUY.json

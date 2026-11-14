@@ -174,6 +174,9 @@ function Features() {
 }
 
 /* ───────── component ───────── */
+// Videos whose transcripts ship with the backend, so they work even where YouTube blocks live fetching.
+const DEMO_VIDEOS = [{ id: "_l4xZLssfUY", label: "How to Be Consistent" }];
+
 const SKIM_CHIPS = ["The main ideas", "Practical tips I can apply", "The key conclusion", "Any examples or stories"];
 const ASK_CHIPS = ["What is this video about?", "What are the key takeaways?", "What examples does the speaker give?"];
 
@@ -296,9 +299,9 @@ export default function App() {
     }
   }
 
-  async function handleIngest(e) {
+  async function handleIngest(e, override) {
     if (e && e.preventDefault) e.preventDefault();
-    const id = extractVideoId(link);
+    const id = extractVideoId(override || link);
     if (!id) {
       setStatus("error: that doesn't look like a YouTube link");
       return;
@@ -317,7 +320,7 @@ export default function App() {
       setLoading(false);
       loadSummary(id);
     } catch (err) {
-      setStatus("error: " + err.message);
+      setStatus("error: " + err.message + ". Live fetching can fail on the hosted demo. Try a demo video.");
       setLoading(false);
     }
   }
@@ -561,6 +564,25 @@ export default function App() {
                 {loading && <span className="spinner" />}
                 {status}
               </div>
+              {!loaded && (
+                <div className="demo-row">
+                  <span>Try a demo:</span>
+                  {DEMO_VIDEOS.map((v) => (
+                    <button
+                      key={v.id}
+                      type="button"
+                      className="chip"
+                      disabled={loading}
+                      onClick={() => {
+                        setLink(`https://youtu.be/${v.id}`);
+                        handleIngest(null, v.id);
+                      }}
+                    >
+                      {v.label}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
             {!loaded && <ChunkMap />}
           </div>
