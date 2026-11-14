@@ -11,7 +11,7 @@ from youtube_transcript_api import YouTubeTranscriptApi
 
 # ek baar load hota hai (server start pe), har request pe nahi
 # fastembed = same MiniLM model, but ONNX (no torch), so it fits in ~512 MB RAM
-model = TextEmbedding("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+model = TextEmbedding("sentence-transformers/all-MiniLM-L6-v2")
 
 
 def embed(texts):
