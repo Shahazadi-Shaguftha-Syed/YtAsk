@@ -9,8 +9,7 @@ import numpy as np
 from fastembed import TextEmbedding
 from youtube_transcript_api import YouTubeTranscriptApi
 
-# ek baar load hota hai (server start pe), har request pe nahi
-# fastembed = same MiniLM model, but ONNX (no torch), so it fits in ~512 MB RAM
+
 model = TextEmbedding("sentence-transformers/all-MiniLM-L6-v2")
 
 
@@ -18,6 +17,8 @@ def embed(texts):
     vecs = np.array(list(model.embed(texts, batch_size=32)), dtype="float32")
     vecs /= np.linalg.norm(vecs, axis=1, keepdims=True)
     return vecs
+
+
 db = chromadb.PersistentClient(path="chroma_db")
 client = Groq(api_key=os.environ["GROQ_API_KEY"])
 
@@ -28,7 +29,6 @@ def fmt_time(seconds):
 
 
 class _TimeoutAdapter(HTTPAdapter):
-    """Har YouTube request pe timeout lagata hai, taaki connection atke toh error mile, hang nahi."""
 
     def __init__(self, *args, timeout=(8, 15), **kwargs):
         self._timeout = timeout
@@ -70,15 +70,19 @@ def make_chunks(transcript, chunk_seconds=20):
     chunks = []
     current_text = ""
     current_start = transcript[0]["start"]
+    current_end = current_start
     for seg in transcript:
+        seg_end = seg["start"] + seg.get("duration", 0)
         if seg["start"] - current_start >= chunk_seconds:
-            chunks.append({"text": current_text, "start": current_start})
+            chunks.append({"text": current_text, "start": current_start, "end": current_end})
             current_text = seg["text"]
             current_start = seg["start"]
+            current_end = seg_end
         else:
             current_text += " " + seg["text"]
+            current_end = max(current_end, seg_end)
     if current_text:
-        chunks.append({"text": current_text, "start": current_start})
+        chunks.append({"text": current_text, "start": current_start, "end": current_end})
     return chunks
 
 
@@ -90,7 +94,6 @@ def get_collection(video_id):
 
 
 def ingest(video_id):
-    """Ek video ko process karke Chroma mein save karta hai. Dobara call karo toh kuch nahi karta."""
     collection = get_collection(video_id)
     if collection.count() > 0:
         return collection.count()
@@ -101,7 +104,7 @@ def ingest(video_id):
         ids=[f"{video_id}_{i}" for i in range(len(chunks))],
         documents=texts,
         embeddings=vectors.tolist(),
-        metadatas=[{"start": c["start"]} for c in chunks],
+        metadatas=[{"start": c["start"], "end": c["end"]} for c in chunks],
     )
     return collection.count()
 
@@ -157,7 +160,6 @@ def llm_json(system, user):
 
 
 def summarize(video_id, section_chunks=9):
-    """9 chunks x 20s = ~3 min per chapter."""
     cache = f"summary_{video_id}.json"
     if os.path.exists(cache):
         with open(cache, encoding="utf-8") as f:
@@ -167,7 +169,7 @@ def summarize(video_id, section_chunks=9):
     if not chunks:
         raise ValueError("video not ingested yet")
 
-    # MAP: har section ka title + summary
+
     chapters = []
     for i in range(0, len(chunks), section_chunks):
         group = chunks[i:i + section_chunks]
@@ -185,7 +187,7 @@ def summarize(video_id, section_chunks=9):
             "summary": data.get("summary", ""),
         })
 
-    # REDUCE: chapter summaries se 5 takeaways
+
     notes = "\n".join(f"[{c['time']}] {c['title']}: {c['summary']}" for c in chapters)
     data = llm_json(
         'Given these chapter notes of a video, return JSON: '
@@ -239,25 +241,37 @@ def stream_answer(messages):
         delta = part.choices[0].delta.content
         if delta:
             yield delta
-        
 
 
-def skim(video_id, query, k=8, merge_gap=10, chunk_len=20):
+def select_relevant(hits, margin=0.12, max_distance=0.75):
+    if not hits:
+        return []
+    best = min(h[0] for h in hits)
+    if best > max_distance:
+        return []
+    return [h for h in hits if h[0] <= max_distance and h[0] <= best + margin]
+
+
+def skim(video_id, query, k=8, merge_gap=10, chunk_len=20, margin=0.12, max_distance=0.75):
     collection = get_collection(video_id)
     if collection.count() == 0:
         raise ValueError("video not ingested yet")
 
     q_vector = embed([query])[0]
     res = collection.query(query_embeddings=[q_vector.tolist()], n_results=k)
-    hits = sorted(
-        zip(res["metadatas"][0], res["documents"][0]),
-        key=lambda h: h[0]["start"],
+    if os.environ.get("SKIM_DEBUG"):
+        print("skim distances:", [round(d, 2) for d in res["distances"][0]], "query:", query)
+    hits = select_relevant(
+        list(zip(res["distances"][0], res["metadatas"][0], res["documents"][0])),
+        margin=margin,
+        max_distance=max_distance,
     )
+    hits.sort(key=lambda h: h[1]["start"])
 
     segments = []
-    for m, doc in hits:
+    for _, m, doc in hits:
         s = m["start"]
-        e = s + chunk_len          
+        e = m.get("end", s + chunk_len)
         if segments and s <= segments[-1]["end"] + merge_gap:
             segments[-1]["end"] = max(segments[-1]["end"], e)
             segments[-1]["text"] += " " + doc
